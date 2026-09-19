@@ -5,7 +5,7 @@ export const EDITOR_IDS = [
 
 export const SIDEBAR_WIDTH = 300;
 
-export const GEMINI_API_KEY = 'AQ.Ab8';
+export const GEMINI_API_KEY = 'AQ.A';
 
 export const GEMINI_ENDPOINT =
   'https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse';

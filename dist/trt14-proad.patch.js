@@ -14,7 +14,7 @@
 (function() {
 	//#region src/config.ts
 	var EDITOR_IDS = ["formCriarMinutaDocumento:editor:editor", "formCriarAutoTexto:editor:editor"];
-	var GEMINI_API_KEY = "AQ.Ab8";
+	var GEMINI_API_KEY = "AQ.A";
 	var GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse";
 	var MODEL_CONFIG = {
 		"gemini-3.5-flash-lite": {
@@ -2354,17 +2354,23 @@ ${state.prompt.value.trim()}
 		const tbody = getHtmlTable()?.querySelector("tbody");
 		if (!tbody) return;
 		sortDirection = sortDirection === "asc" ? "desc" : "asc";
+		const colorOrder = {
+			red: 0,
+			yellow: 1,
+			green: 2
+		};
 		const items = getRows().map((row) => ({
 			row,
 			extra: row.nextElementSibling && !row.nextElementSibling.hasAttribute("data-rk") && row.nextElementSibling.classList.contains("ui-expanded-row-content") ? row.nextElementSibling : null,
-			text: getAnnotation(getProcessKey(row)).text.trim()
+			annotation: getAnnotation(getProcessKey(row))
 		}));
 		items.sort((a, b) => {
-			const emptyA = a.text === "";
-			const emptyB = b.text === "";
+			const emptyA = a.annotation.text.trim() === "";
+			const emptyB = b.annotation.text.trim() === "";
 			if (emptyA && !emptyB) return 1;
 			if (!emptyA && emptyB) return -1;
-			const result = a.text.localeCompare(b.text, "pt-BR", { sensitivity: "base" });
+			if (emptyA && emptyB) return 0;
+			const result = colorOrder[a.annotation.color] - colorOrder[b.annotation.color];
 			return sortDirection === "asc" ? result : -result;
 		});
 		const fragment = document.createDocumentFragment();
