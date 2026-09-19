@@ -1,7 +1,5 @@
 import { initializeProadStorage } from '../../utils/storage';
 
-
-
 import {
   applyAnnotationFilter,
   createAnnotationCell,
@@ -177,20 +175,99 @@ function isExpansionMutation(mutation: MutationRecord): boolean {
 // OBSERVADOR
 // ============================================================
 
+// ============================================================
+// MUTAÇÕES PRÓPRIAS
+// ============================================================
+
+function isOwnMutation(mutation: MutationRecord): boolean {
+  const target = mutation.target;
+
+  /*
+   * Alterações dentro dos elementos que o próprio userscript
+   * controla não precisam disparar uma nova aplicação.
+   */
+  if (
+    target instanceof Element &&
+    (Boolean(target.closest('[data-proad-annotation-cell]')) ||
+      Boolean(target.closest('[data-proad-annotations-header]')) ||
+      Boolean(target.closest('#proad-column-panel')))
+  ) {
+    return true;
+  }
+
+  const nodes = [
+    ...Array.from(mutation.addedNodes),
+    ...Array.from(mutation.removedNodes),
+  ];
+
+  if (nodes.length === 0) {
+    return false;
+  }
+
+  /*
+   * Elementos criados diretamente pelo userscript.
+   */
+  return nodes.every((node) => {
+    if (!(node instanceof Element)) {
+      return true;
+    }
+
+    return (
+      node.id === 'proad-column-toggle' ||
+      node.classList.contains('proad-annotations-header') ||
+      node.classList.contains('proad-annotation-cell')
+    );
+  });
+}
+
+// ============================================================
+// MUTAÇÕES RELACIONADAS À TABELA
+// ============================================================
+
+function isTableRelatedMutation(mutation: MutationRecord): boolean {
+  const table = getTableContainer();
+
+  /*
+   * Se a tabela existe e o alvo está dentro dela,
+   * a mutação é relevante.
+   */
+  if (
+    table &&
+    mutation.target instanceof Element &&
+    (mutation.target === table || table.contains(mutation.target))
+  ) {
+    return true;
+  }
+
+  const nodes = [
+    ...Array.from(mutation.addedNodes),
+    ...Array.from(mutation.removedNodes),
+  ];
+
+  /*
+   * O PrimeFaces pode substituir a própria tabela ou algum
+   * wrapper que contenha a tabela. Nesse caso o target pode
+   * ser o body/form, então precisamos inspecionar os nós.
+   */
+  return nodes.some((node) => {
+    if (!(node instanceof Element)) {
+      return false;
+    }
+
+    if (node.id === 'formProtocolos:tblEstouTratando') {
+      return true;
+    }
+
+    return Boolean(node.querySelector('#formProtocolos\\:tblEstouTratando'));
+  });
+}
+
 function observePage(): void {
   if (bodyObserver || !document.body) {
     return;
   }
 
   bodyObserver = new MutationObserver((mutations) => {
-    /*
-     * Se acabamos de clicar em um botão de expandir,
-     * deixamos o PrimeFaces terminar primeiro.
-     */
-    if (performance.now() < expansionGuardUntil) {
-      return;
-    }
-
     const childListMutations = mutations.filter(
       (mutation) => mutation.type === 'childList',
     );
@@ -200,11 +277,46 @@ function observePage(): void {
     }
 
     /*
-     * Não precisamos reaplicar a feature quando a única
-     * alteração foi a criação/remoção/conteúdo da linha
-     * expandida.
+     * Ignora completamente alterações fora da tabela.
+     *
+     * Isso é o que impede que:
+     *
+     *   abrir modal
+     *   fechar modal
+     *   abrir painel de colunas
+     *
+     * faça o applyEnhancements() novamente.
      */
-    if (childListMutations.every(isExpansionMutation)) {
+    const relevantMutations = childListMutations.filter(isTableRelatedMutation);
+
+    if (relevantMutations.length === 0) {
+      return;
+    }
+
+    /*
+     * Ignora mutações provocadas pelo próprio userscript.
+     */
+    const externalMutations = relevantMutations.filter(
+      (mutation) => !isOwnMutation(mutation),
+    );
+
+    if (externalMutations.length === 0) {
+      return;
+    }
+
+    /*
+     * Se acabamos de clicar em um botão de expansão,
+     * deixamos o PrimeFaces terminar primeiro.
+     */
+    if (performance.now() < expansionGuardUntil) {
+      return;
+    }
+
+    /*
+     * Se todas as alterações externas são apenas do ciclo
+     * de expansão/contração, não precisamos reaplicar.
+     */
+    if (externalMutations.every(isExpansionMutation)) {
       return;
     }
 
