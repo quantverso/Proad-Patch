@@ -51,30 +51,30 @@ function sanitizeGeneratedText(text: string): string {
     text
       .normalize('NFC')
 
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
       // Remove caracteres invisíveis que estejam entre
       // letras/números, junto com espaços ao redor deles.
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
 
       .replace(/([\p{L}\p{N}])[ \t]*\p{Cf}+[ \t]*(?=[\p{L}\p{N}])/gu, '$1')
 
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
       // Remove qualquer outro caractere Unicode de formatação.
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
 
       .replace(/\p{Cf}/gu, '')
 
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
       // Normaliza espaços Unicode especiais.
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
 
       .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
 
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
       // Normaliza espaços horizontais.
       //
       // Não altera \r nem \n.
-      // ----------------------------------------------------------
+      // --------------------------------------------------------
 
       .replace(/[^\S\r\n]+/gu, ' ')
   );
@@ -90,14 +90,6 @@ function sanitizeGeneratedText(text: string): string {
 // Isso é importante porque um caractere invisível pode estar
 // dividido entre dois chunks.
 //
-// Exemplo:
-//
-// chunk 1 -> "Senhor "
-// chunk 2 -> "​​​​"
-// chunk 3 -> "​​​ ia"
-//
-// Como processamos receivedText inteiro, o resultado final
-// continua sendo "Senhoria".
 // ============================================================
 
 function buildGeneratedInnerHtml(
@@ -256,7 +248,7 @@ export function toggleSidebar(button: HTMLElement) {
 }
 
 // ============================================================
-// CONTEXTO — CARREGAMENTO COMPARTILHADO
+// CONTEXTO
 // ============================================================
 
 async function restoreAssistantContext(state: AssistantState): Promise<void> {
@@ -359,315 +351,260 @@ export async function generateAssistant(state: AssistantState) {
 
   let completed = false;
 
-  // ==========================================================
-  // CAPTURA DOCUMENTO
-  // ==========================================================
-
-  const currentDocumentHtml = editor.getData();
-
-  // ==========================================================
-  // PROCURA {{ }}
-  // ==========================================================
-
-  const delimitedRegion = findDelimitedRegion(editor);
-
-  const isDelimited = delimitedRegion !== null;
-
-  // ==========================================================
-  // DOCUMENTO AUTORIZADO PARA A IA
-  // ==========================================================
-
-  let authorizedDocument = '';
-
-  if (delimitedRegion) {
-    authorizedDocument = htmlToPlainText(delimitedRegion.html);
-  } else {
-    authorizedDocument = htmlToPlainText(currentDocumentHtml);
-  }
-
-  // ==========================================================
-  // MASCARA DADOS
-  // ==========================================================
-
-  const maskedDocument = maskDocument(authorizedDocument, context);
-
-  // ==========================================================
-  // PROAD
-  // ==========================================================
-
-  const proadNumber = getProadNumber();
-
-  // ==========================================================
-  // PROMPT
-  // ==========================================================
-
-  const input = buildPrompt(
-    state,
-    maskedDocument,
-    contextKeys,
-    proadNumber,
-    isDelimited,
-  );
-
-  // ==========================================================
-  // POSIÇÃO DE INSERÇÃO
-  // ==========================================================
-
-  if (delimitedRegion) {
-    // --------------------------------------------------------
-    // Somente o conteúdo entre {{ }} foi removido.
-    // Os delimitadores continuam no documento.
-    // --------------------------------------------------------
-
-    const range = delimitedRegion.insertionRange;
-
-    editor.focus();
-
-    range.select();
-
-    range.collapse(true);
-
-    const selection = editor.getSelection();
-
-    if (selection) {
-      selection.selectRanges([range]);
-    }
-  } else {
-    // ========================================================
-    // SEM {{ }}
-    // ========================================================
-
-    await new Promise<void>((resolve) => {
-      editor.setData('', () => resolve());
-    });
-
-    editor.focus();
-
-    const range = editor.createRange();
-
-    const editable = editor.editable();
-
-    if (!editable) {
-      throw new Error('Área editável do CKEditor não encontrada.');
-    }
-
-    range.moveToElementEditStart(editable);
-
-    range.select();
-
-    range.collapse(true);
-
-    const selection = editor.getSelection();
-
-    if (selection) {
-      selection.selectRanges([range]);
-    }
-  }
-
-  // ==========================================================
-  // ELEMENTO NATIVO DA GERAÇÃO
-  // ==========================================================
-  //
-  // NÃO usamos:
-  //
-  // editor.insertElement()
-  // editor.insertHtml()
-  //
-  // para o streaming.
-  //
-  // Usamos o Range NATIVO do navegador dentro do iframe.
-  //
-  // O CKEditor continua contendo esse DOM normalmente,
-  // mas não precisa reconstruí-lo a cada chunk.
-  // ==========================================================
+  let isDelimited = false;
 
   let generatedElement: HTMLSpanElement | null = null;
 
-  // ==========================================================
-  // SANITIZAÇÃO
-  // ==========================================================
+  // ----------------------------------------------------------
+  // Range NATIVO usado quando existe {{ }}.
+  // ----------------------------------------------------------
 
-  function sanitizeGeneratedText(text: string): string {
-    return (
-      text
-        .normalize('NFC')
-
-        // ------------------------------------------------------
-        // Caracteres invisíveis entre letras/números.
-        //
-        // "Senhor [invisível] ia"
-        //             ↓
-        // "Senhoria"
-        //
-        // "Trib [invisível] unal"
-        //             ↓
-        // "Tribunal"
-        //
-        // "1 [invisível] 4ª"
-        //             ↓
-        // "14ª"
-        // ------------------------------------------------------
-
-        .replace(/([\p{L}\p{N}])[ \t]*\p{Cf}+[ \t]*(?=[\p{L}\p{N}])/gu, '$1')
-
-        // ------------------------------------------------------
-        // Remove os demais caracteres Unicode de formatação.
-        // ------------------------------------------------------
-
-        .replace(/\p{Cf}/gu, '')
-
-        // ------------------------------------------------------
-        // Espaços Unicode especiais -> espaço normal.
-        // ------------------------------------------------------
-
-        .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
-
-        // ------------------------------------------------------
-        // Normaliza espaços horizontais.
-        //
-        // Não mexe em \r e \n.
-        // ------------------------------------------------------
-
-        .replace(/[^\S\r\n]+/gu, ' ')
-    );
-  }
-
-  // ==========================================================
-  // CONVERTE TEXTO PARA HTML
-  // ==========================================================
-
-  function buildGeneratedHtml(text: string): string {
-    const sanitizedText = sanitizeGeneratedText(text);
-
-    if (!sanitizedText) {
-      return '';
-    }
-
-    let html = escapeHtml(sanitizedText);
-
-    html = html
-      .replace(/\r\n/g, '\n')
-      .replace(/\r/g, '\n')
-      .replace(/\n/g, '<br>');
-
-    html = unmaskDocument(html, context);
-
-    return html;
-  }
-
-  // ==========================================================
-  // CRIA O ELEMENTO NO PRIMEIRO CHUNK
-  // ==========================================================
-
-  function createGeneratedElement(html: string): HTMLSpanElement {
-    const selection = editor.getSelection();
-
-    if (!selection) {
-      throw new Error('Seleção do CKEditor não encontrada.');
-    }
-
-    const nativeSelection = selection.getNative();
-
-    if (!nativeSelection || nativeSelection.rangeCount === 0) {
-      throw new Error('Seleção nativa do editor não encontrada.');
-    }
-
-    // --------------------------------------------------------
-    // Obtém o range REAL do navegador.
-    // --------------------------------------------------------
-
-    const nativeRange = nativeSelection.getRangeAt(0).cloneRange();
-
-    // --------------------------------------------------------
-    // Cria o span diretamente no documento do iframe.
-    // --------------------------------------------------------
-
-    const nativeDocument = editor.document.$;
-
-    const span = nativeDocument.createElement('span') as HTMLSpanElement;
-
-    span.style.fontFamily = 'Arial, sans-serif';
-
-    span.style.fontSize = '16px';
-
-    span.innerHTML = html;
-
-    // --------------------------------------------------------
-    // Insere exatamente no ponto selecionado.
-    //
-    // Aqui NÃO existe chamada ao insertBefore do CKEditor.
-    // É o DOM nativo que faz a inserção.
-    // --------------------------------------------------------
-
-    nativeRange.insertNode(span);
-
-    // --------------------------------------------------------
-    // Coloca a seleção depois do elemento.
-    //
-    // Não precisamos mantê-la dentro do conteúdo porque
-    // a atualização do texto será feita diretamente via DOM.
-    // --------------------------------------------------------
-
-    nativeRange.setStartAfter(span);
-
-    nativeRange.collapse(true);
-
-    nativeSelection.removeAllRanges();
-
-    nativeSelection.addRange(nativeRange);
-
-    return span;
-  }
-
-  // ==========================================================
-  // RENDERIZAÇÃO INCREMENTAL
-  // ==========================================================
-  //
-  // A cada chunk:
-  //
-  // 1. receivedText recebe o novo trecho;
-  // 2. todo o conteúdo é sanitizado novamente;
-  // 3. o HTML é reconstruído;
-  // 4. o mesmo span é atualizado.
-  //
-  // Isso mantém o texto visível em tempo real e, ao mesmo
-  // tempo, permite corrigir caracteres invisíveis que tenham
-  // atravessado a fronteira entre dois chunks.
-  // ==========================================================
-
-  const renderGeneratedText = () => {
-    const html = buildGeneratedHtml(receivedText);
-
-    if (!html) {
-      return;
-    }
-
-    // ------------------------------------------------------
-    // PRIMEIRO CHUNK
-    // ------------------------------------------------------
-
-    if (!generatedElement) {
-      generatedElement = createGeneratedElement(html);
-
-      return;
-    }
-
-    // ------------------------------------------------------
-    // CHUNKS SEGUINTES
-    //
-    // Atualização direta do DOM nativo.
-    // ------------------------------------------------------
-
-    generatedElement.innerHTML = html;
-  };
-
-  // ==========================================================
-  // GERAÇÃO
-  // ==========================================================
-
-  setAssistantStatus(state, 'Gerando documento...', true);
+  let nativeInsertionRange: Range | null = null;
 
   try {
+    // ========================================================
+    // CAPTURA DOCUMENTO
+    // ========================================================
+
+    const currentDocumentHtml = editor.getData();
+
+    // ========================================================
+    // PROCURA {{ }}
+    // ========================================================
+
+    const delimitedRegion = findDelimitedRegion(editor);
+
+    isDelimited = delimitedRegion !== null;
+
+    // ========================================================
+    // DOCUMENTO AUTORIZADO PARA A IA
+    // ========================================================
+
+    let authorizedDocument = '';
+
+    if (delimitedRegion) {
+      authorizedDocument = htmlToPlainText(delimitedRegion.html);
+    } else {
+      authorizedDocument = htmlToPlainText(currentDocumentHtml);
+    }
+
+    // ========================================================
+    // MASCARA DADOS
+    // ========================================================
+
+    const maskedDocument = maskDocument(authorizedDocument, context);
+
+    // ========================================================
+    // PROAD
+    // ========================================================
+
+    const proadNumber = getProadNumber();
+
+    // ========================================================
+    // PROMPT
+    // ========================================================
+
+    const input = buildPrompt(
+      state,
+      maskedDocument,
+      contextKeys,
+      proadNumber,
+      isDelimited,
+    );
+
+    // ========================================================
+    // POSIÇÃO DE INSERÇÃO
+    // ========================================================
+
+    if (delimitedRegion) {
+      // ------------------------------------------------------
+      // {{ }}:
+      //
+      // O conteúdo interno já foi removido por
+      // findDelimitedRegion().
+      //
+      // O Range devolvido é NATIVO.
+      // ------------------------------------------------------
+
+      nativeInsertionRange = delimitedRegion.insertionRange.cloneRange();
+
+      editor.focus();
+
+      const nativeDocument = editor.document.$;
+
+      const nativeSelection = nativeDocument.getSelection();
+
+      if (!nativeSelection) {
+        throw new Error('Seleção nativa do editor não encontrada.');
+      }
+
+      // ------------------------------------------------------
+      // IMPORTANTE:
+      //
+      // Range nativo NÃO possui .select().
+      // Usamos Selection.addRange().
+      // ------------------------------------------------------
+
+      nativeSelection.removeAllRanges();
+
+      nativeSelection.addRange(nativeInsertionRange);
+    } else {
+      // ======================================================
+      // SEM {{ }}
+      // ======================================================
+
+      await new Promise<void>((resolve) => {
+        editor.setData('', () => resolve());
+      });
+
+      editor.focus();
+
+      const range = editor.createRange();
+
+      const editable = editor.editable();
+
+      if (!editable) {
+        throw new Error('Área editável do CKEditor não encontrada.');
+      }
+
+      range.moveToElementEditStart(editable);
+
+      range.select();
+
+      range.collapse(true);
+
+      const selection = editor.getSelection();
+
+      if (selection) {
+        selection.selectRanges([range]);
+      }
+    }
+
+    // ========================================================
+    // CRIA ELEMENTO DA GERAÇÃO
+    // ========================================================
+
+    const createGeneratedElement = (html: string): HTMLSpanElement => {
+      let nativeRange: Range;
+
+      // ------------------------------------------------------
+      // {{ }}:
+      //
+      // Usa o Range nativo capturado anteriormente.
+      // ------------------------------------------------------
+
+      if (nativeInsertionRange) {
+        nativeRange = nativeInsertionRange.cloneRange();
+      } else {
+        // ----------------------------------------------------
+        // Geração normal:
+        //
+        // Converte a seleção do CKEditor em Range nativo.
+        // ----------------------------------------------------
+
+        const selection = editor.getSelection();
+
+        if (!selection) {
+          throw new Error('Seleção do CKEditor não encontrada.');
+        }
+
+        const nativeSelection = selection.getNative();
+
+        if (!nativeSelection || nativeSelection.rangeCount === 0) {
+          throw new Error('Seleção nativa do editor não encontrada.');
+        }
+
+        nativeRange = nativeSelection.getRangeAt(0).cloneRange();
+      }
+
+      // ------------------------------------------------------
+      // Documento nativo do iframe.
+      // ------------------------------------------------------
+
+      const nativeDocument = editor.document.$;
+
+      // ------------------------------------------------------
+      // Cria elemento.
+      // ------------------------------------------------------
+
+      const span = nativeDocument.createElement('span') as HTMLSpanElement;
+
+      span.style.fontFamily = 'Arial, sans-serif';
+
+      span.style.fontSize = '16px';
+
+      span.innerHTML = html;
+
+      // ------------------------------------------------------
+      // Insere diretamente no DOM.
+      // ------------------------------------------------------
+
+      nativeRange.insertNode(span);
+
+      // ------------------------------------------------------
+      // Mantém o range imediatamente depois do elemento.
+      // ------------------------------------------------------
+
+      nativeRange.setStartAfter(span);
+
+      nativeRange.collapse(true);
+
+      // ------------------------------------------------------
+      // Atualiza seleção nativa.
+      // ------------------------------------------------------
+
+      const nativeSelection = nativeDocument.getSelection();
+
+      if (nativeSelection) {
+        nativeSelection.removeAllRanges();
+
+        nativeSelection.addRange(nativeRange);
+      }
+
+      return span;
+    };
+
+    // ========================================================
+    // RENDERIZAÇÃO
+    // ========================================================
+
+    const renderGeneratedText = () => {
+      const html = buildGeneratedInnerHtml(receivedText, context);
+
+      if (!html) {
+        return;
+      }
+
+      // ----------------------------------------------------
+      // PRIMEIRO CHUNK
+      // ----------------------------------------------------
+
+      if (!generatedElement) {
+        generatedElement = createGeneratedElement(html);
+
+        return;
+      }
+
+      // ----------------------------------------------------
+      // CHUNKS SEGUINTES
+      // ----------------------------------------------------
+      //
+      // Atualização direta do DOM.
+      // ----------------------------------------------------
+
+      generatedElement.innerHTML = html;
+    };
+
+    // ========================================================
+    // STATUS
+    // ========================================================
+
+    setAssistantStatus(state, 'Gerando documento...', true);
+
+    // ========================================================
+    // STREAM
+    // ========================================================
+
     await streamGemini({
       input,
 
@@ -693,7 +630,7 @@ export async function generateAssistant(state: AssistantState) {
         receivedText += text;
 
         // ----------------------------------------------------
-        // Atualiza o editor imediatamente.
+        // Renderização imediata.
         // ----------------------------------------------------
 
         renderGeneratedText();
@@ -727,18 +664,11 @@ export async function generateAssistant(state: AssistantState) {
     // ========================================================
     // RENDERIZAÇÃO FINAL
     // ========================================================
-    //
-    // Garante que o DOM reflita exatamente a resposta completa.
-    // ========================================================
 
     renderGeneratedText();
 
     // ========================================================
-    // ATUALIZA O ELEMENTO EXTERNO
-    // ========================================================
-    //
-    // Isso ajuda o CKEditor a manter seu elemento <textarea>
-    // sincronizado com o conteúdo atual.
+    // ATUALIZA ELEMENTO EXTERNO
     // ========================================================
 
     editor.updateElement();
@@ -762,15 +692,18 @@ export async function generateAssistant(state: AssistantState) {
     // ========================================================
 
     if (error instanceof DOMException && error.name === 'AbortError') {
-      // ------------------------------------------------------
-      // Mesmo cancelada, preservamos tudo o que já foi gerado.
-      // ------------------------------------------------------
-
-      editor.updateElement();
+      try {
+        editor.updateElement();
+      } catch (updateError) {
+        console.error(
+          '[TRT14 Assistente] Erro ao atualizar editor após cancelamento:',
+          updateError,
+        );
+      }
 
       setAssistantStatus(state, 'Geração interrompida.');
     } else {
-      console.error('[TRT14 Assistente]', error);
+      console.error('[TRT14 Assistente] Erro durante geração:', error);
 
       setAssistantStatus(
         state,
@@ -778,6 +711,10 @@ export async function generateAssistant(state: AssistantState) {
       );
     }
   } finally {
+    // ========================================================
+    // SEMPRE RESTAURA O ESTADO
+    // ========================================================
+
     state.generating = false;
 
     state.abortController = null;

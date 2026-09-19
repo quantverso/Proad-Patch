@@ -1,27 +1,76 @@
+// ============================================================
+// REGIÃO DELIMITADA {{ }}
+// ============================================================
+//
+// Localiza o primeiro trecho:
+//
+//   {{ conteúdo }}
+//
+// e retorna:
+//
+// - html: HTML original do conteúdo interno;
+// - text: texto puro do conteúdo interno;
+// - insertionRange: Range NATIVO colapsado exatamente no ponto
+//   onde a geração deverá ser inserida.
+//
+// IMPORTANTE:
+//
+// Este módulo NÃO depende de:
+//
+//   CKEDITOR.dom
+//   globalThis.CKEDITOR
+//   namespace CKEDITOR no TypeScript
+//
+// A manipulação da região delimitada é feita exclusivamente
+// com as APIs nativas do DOM.
+// ============================================================
+
 export interface DelimitedRegion {
-  // HTML original do conteúdo entre {{ e }}.
   html: string;
-
-  // Texto puro do conteúdo entre {{ e }}.
   text: string;
-
-  // Range exatamente entre {{ e }}.
-  insertionRange: any;
+  insertionRange: Range;
 }
 
 // ============================================================
-// OBTÉM TODOS OS TEXT NODES
+// TIPO MÍNIMO DO EDITOR
+// ============================================================
+//
+// Não precisamos conhecer o tipo completo do CKEditor aqui.
+// Precisamos somente do pedaço da API utilizado por este
+// módulo: editor.document.getBody().$
+// ============================================================
+
+interface EditorDocument {
+  getBody(): {
+    $: HTMLElement;
+  } | null;
+}
+
+interface EditorLike {
+  document: EditorDocument;
+}
+
+// ============================================================
+// TEXT NODES
 // ============================================================
 
 function getTextNodes(root: Node): Text[] {
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const ownerDocument = root.ownerDocument;
+
+  if (!ownerDocument) {
+    return [];
+  }
+
+  const walker = ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT);
 
   const nodes: Text[] = [];
 
   let current = walker.nextNode();
 
   while (current) {
-    nodes.push(current as Text);
+    if (current.nodeType === Node.TEXT_NODE) {
+      nodes.push(current as Text);
+    }
 
     current = walker.nextNode();
   }
@@ -30,7 +79,21 @@ function getTextNodes(root: Node): Text[] {
 }
 
 // ============================================================
-// RESOLVE POSIÇÃO GLOBAL
+// RESOLVE POSIÇÃO GLOBAL -> TEXT NODE
+// ============================================================
+//
+// O conteúdo textual de todos os nós é tratado como uma única
+// sequência.
+//
+// Exemplo:
+//
+//   node 1: "abc"
+//   node 2: "defgh"
+//   node 3: "ijk"
+//
+// posição 5:
+//   node 2, offset 2
+//
 // ============================================================
 
 function resolvePosition(
@@ -56,7 +119,7 @@ function resolvePosition(
   }
 
   // ----------------------------------------------------------
-  // Exatamente no final.
+  // Permite posição exatamente no final do último nó.
   // ----------------------------------------------------------
 
   if (nodes.length > 0) {
@@ -79,50 +142,35 @@ function resolvePosition(
 }
 
 // ============================================================
-// CRIA RANGE CKEDITOR
+// FIND DELIMITED REGION
 // ============================================================
 
-function createCKEditorRange(
-  editor: any,
-  start: {
-    node: Text;
-    offset: number;
-  },
-  end: {
-    node: Text;
-    offset: number;
-  },
-): any {
-  const CKEDITOR = (globalThis as any).CKEDITOR;
+export function findDelimitedRegion(
+  editor: EditorLike,
+): DelimitedRegion | null {
+  // ----------------------------------------------------------
+  // Corpo do editor.
+  // ----------------------------------------------------------
 
-  const range = new CKEDITOR.dom.range(editor.document);
-
-  range.setStart(new CKEDITOR.dom.node(start.node), start.offset);
-
-  range.setEnd(new CKEDITOR.dom.node(end.node), end.offset);
-
-  return range;
-}
-
-// ============================================================
-// ENCONTRA {{ }}
-// ============================================================
-//
-// Importante:
-//
-// {{ e }} NÃO fazem parte do range.
-//
-// Somente o conteúdo interno é apagado.
-// ============================================================
-
-export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   const body = editor.document.getBody();
 
   if (!body) {
     return null;
   }
 
-  const nativeBody = body.$ as HTMLElement;
+  // ----------------------------------------------------------
+  // Elemento DOM NATIVO do corpo do iframe.
+  // ----------------------------------------------------------
+
+  const nativeBody = body.$;
+
+  if (!nativeBody) {
+    return null;
+  }
+
+  // ----------------------------------------------------------
+  // Todos os nós de texto.
+  // ----------------------------------------------------------
 
   const nodes = getTextNodes(nativeBody);
 
@@ -130,9 +178,9 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
     return null;
   }
 
-  // ==========================================================
-  // TEXTO COMPLETO
-  // ==========================================================
+  // ----------------------------------------------------------
+  // Constrói o texto completo.
+  // ----------------------------------------------------------
 
   let fullText = '';
 
@@ -141,7 +189,7 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   }
 
   // ==========================================================
-  // ABERTURA
+  // LOCALIZA {{
   // ==========================================================
 
   const openIndex = fullText.indexOf('{{');
@@ -151,7 +199,7 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   }
 
   // ==========================================================
-  // FECHAMENTO
+  // LOCALIZA }}
   // ==========================================================
 
   const closeIndex = fullText.indexOf('}}', openIndex + 2);
@@ -161,7 +209,7 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   }
 
   // ==========================================================
-  // INTERIOR
+  // POSIÇÕES DO CONTEÚDO INTERNO
   // ==========================================================
 
   const innerStartIndex = openIndex + 2;
@@ -177,18 +225,32 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   }
 
   // ==========================================================
-  // EXTRAI HTML INTERNO
+  // DOCUMENTO NATIVO
   // ==========================================================
 
-  const nativeRange = nativeBody.ownerDocument!.createRange();
+  const nativeDocument = nativeBody.ownerDocument;
+
+  if (!nativeDocument) {
+    return null;
+  }
+
+  // ==========================================================
+  // RANGE NATIVO
+  // ==========================================================
+
+  const nativeRange = nativeDocument.createRange();
 
   nativeRange.setStart(innerStart.node, innerStart.offset);
 
   nativeRange.setEnd(innerEnd.node, innerEnd.offset);
 
+  // ==========================================================
+  // CAPTURA HTML ORIGINAL
+  // ==========================================================
+
   const fragment = nativeRange.cloneContents();
 
-  const wrapper = nativeBody.ownerDocument!.createElement('div');
+  const wrapper = nativeDocument.createElement('div');
 
   wrapper.appendChild(fragment);
 
@@ -197,40 +259,39 @@ export function findDelimitedRegion(editor: any): DelimitedRegion | null {
   const text = wrapper.textContent ?? '';
 
   // ==========================================================
-  // RANGE INTERNO
+  // REMOVE SOMENTE O CONTEÚDO INTERNO
   // ==========================================================
   //
-  // IMPORTANTE:
+  // Exemplo:
   //
-  // {{ [INÍCIO DO RANGE] conteúdo [FIM DO RANGE] }}
+  // Antes:
   //
-  // Os delimitadores ficam fora.
+  //   {{ escreva o ofício }}
+  //
+  // Depois:
+  //
+  //   {{ }}
+  //
+  // Os delimitadores permanecem.
+  //
   // ==========================================================
 
-  const insertionRange = createCKEditorRange(editor, innerStart, innerEnd);
+  nativeRange.deleteContents();
+
+  // ----------------------------------------------------------
+  // O range agora está colapsado no ponto onde o texto
+  // gerado deverá ser inserido.
+  // ----------------------------------------------------------
+
+  nativeRange.collapse(true);
 
   // ==========================================================
-  // APAGA SOMENTE O CONTEÚDO
+  // RESULTADO
   // ==========================================================
-
-  insertionRange.deleteContents();
-
-  insertionRange.collapse(true);
 
   return {
     html,
     text,
-    insertionRange,
+    insertionRange: nativeRange,
   };
-}
-
-// ============================================================
-// LIMPA EDITOR
-// ============================================================
-//
-// Utilizado somente quando não existem {{ }}.
-// ============================================================
-
-export function clearEditor(editor: any): void {
-  editor.setData('');
 }
