@@ -32,6 +32,97 @@ import { findDelimitedRegion } from '../../utils/editor-region';
 export const assistantStates = new WeakMap<Element, AssistantState>();
 
 // ============================================================
+// TEXTO GERADO PELA IA
+// ============================================================
+//
+// A IA pode devolver caracteres Unicode invisíveis/de formatação.
+// Alguns deles podem aparecer no meio de palavras:
+//
+// "Senhor [invisível] ia" -> "Senhoria"
+// "Trib [invisível] unal" -> "Tribunal"
+// "1 [invisível] 4ª"      -> "14ª"
+//
+// A sanitização também normaliza espaços Unicode especiais.
+// As quebras de linha são preservadas.
+// ============================================================
+
+function sanitizeGeneratedText(text: string): string {
+  return (
+    text
+      .normalize('NFC')
+
+      // ----------------------------------------------------------
+      // Remove caracteres invisíveis que estejam entre
+      // letras/números, junto com espaços ao redor deles.
+      // ----------------------------------------------------------
+
+      .replace(/([\p{L}\p{N}])[ \t]*\p{Cf}+[ \t]*(?=[\p{L}\p{N}])/gu, '$1')
+
+      // ----------------------------------------------------------
+      // Remove qualquer outro caractere Unicode de formatação.
+      // ----------------------------------------------------------
+
+      .replace(/\p{Cf}/gu, '')
+
+      // ----------------------------------------------------------
+      // Normaliza espaços Unicode especiais.
+      // ----------------------------------------------------------
+
+      .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+
+      // ----------------------------------------------------------
+      // Normaliza espaços horizontais.
+      //
+      // Não altera \r nem \n.
+      // ----------------------------------------------------------
+
+      .replace(/[^\S\r\n]+/gu, ' ')
+  );
+}
+
+// ============================================================
+// CONVERTE TEXTO PARA HTML
+// ============================================================
+//
+// Esta função trabalha com o documento inteiro recebido até
+// aquele momento.
+//
+// Isso é importante porque um caractere invisível pode estar
+// dividido entre dois chunks.
+//
+// Exemplo:
+//
+// chunk 1 -> "Senhor "
+// chunk 2 -> "​​​​"
+// chunk 3 -> "​​​ ia"
+//
+// Como processamos receivedText inteiro, o resultado final
+// continua sendo "Senhoria".
+// ============================================================
+
+function buildGeneratedInnerHtml(
+  text: string,
+  context: Record<string, string>,
+): string {
+  const sanitizedText = sanitizeGeneratedText(text);
+
+  if (!sanitizedText) {
+    return '';
+  }
+
+  let html = escapeHtml(sanitizedText);
+
+  html = html
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\n/g, '<br>');
+
+  html = unmaskDocument(html, context);
+
+  return html;
+}
+
+// ============================================================
 // STATUS
 // ============================================================
 
@@ -75,6 +166,7 @@ export function updateThinkingOptions(state: AssistantState) {
     const option = document.createElement('option');
 
     option.value = level;
+
     option.textContent = getThinkingLabel(level);
 
     state.thinkingSelect.appendChild(option);
@@ -227,15 +319,6 @@ export async function generateAssistant(state: AssistantState) {
   // ==========================================================
   // CONTEXTO
   // ==========================================================
-  //
-  // IMPORTANTE:
-  //
-  // O contexto agora está no IndexedDB.
-  // Portanto, a leitura precisa ser aguardada.
-  //
-  // Isso garante que a IA enxergue também os dados
-  // inseridos pela tela "Estou Tratando".
-  // ==========================================================
 
   let context: Record<string, string> = {};
 
@@ -243,8 +326,6 @@ export async function generateAssistant(state: AssistantState) {
     try {
       context = await loadProadContext(state.proadReference);
 
-      // Mantém a interface sincronizada com o
-      // registro mais recente do IndexedDB.
       loadContext(state, context);
     } catch (error) {
       console.error(
@@ -299,16 +380,8 @@ export async function generateAssistant(state: AssistantState) {
   let authorizedDocument = '';
 
   if (delimitedRegion) {
-    // --------------------------------------------------------
-    // Somente o conteúdo entre {{ }}
-    // --------------------------------------------------------
-
     authorizedDocument = htmlToPlainText(delimitedRegion.html);
   } else {
-    // --------------------------------------------------------
-    // Documento inteiro
-    // --------------------------------------------------------
-
     authorizedDocument = htmlToPlainText(currentDocumentHtml);
   }
 
@@ -342,9 +415,8 @@ export async function generateAssistant(state: AssistantState) {
 
   if (delimitedRegion) {
     // --------------------------------------------------------
-    // O findDelimitedRegion() apagou somente o conteúdo.
-    //
-    // {{ e }} continuam intactos.
+    // Somente o conteúdo entre {{ }} foi removido.
+    // Os delimitadores continuam no documento.
     // --------------------------------------------------------
 
     const range = delimitedRegion.insertionRange;
@@ -363,10 +435,6 @@ export async function generateAssistant(state: AssistantState) {
   } else {
     // ========================================================
     // SEM {{ }}
-    // ========================================================
-    //
-    // Primeiro limpa.
-    // Depois cria o Range.
     // ========================================================
 
     await new Promise<void>((resolve) => {
@@ -397,67 +465,200 @@ export async function generateAssistant(state: AssistantState) {
   }
 
   // ==========================================================
-  // INSERE CHUNK
+  // ELEMENTO NATIVO DA GERAÇÃO
   // ==========================================================
   //
-  // Sem tabs automáticos.
+  // NÃO usamos:
   //
-  // A IA gera exatamente o texto solicitado.
+  // editor.insertElement()
+  // editor.insertHtml()
   //
-  // \n → <br>
+  // para o streaming.
+  //
+  // Usamos o Range NATIVO do navegador dentro do iframe.
+  //
+  // O CKEditor continua contendo esse DOM normalmente,
+  // mas não precisa reconstruí-lo a cada chunk.
   // ==========================================================
 
-  const insertChunk = (text: string) => {
-    if (!text) {
-      return;
+  let generatedElement: HTMLSpanElement | null = null;
+
+  // ==========================================================
+  // SANITIZAÇÃO
+  // ==========================================================
+
+  function sanitizeGeneratedText(text: string): string {
+    return (
+      text
+        .normalize('NFC')
+
+        // ------------------------------------------------------
+        // Caracteres invisíveis entre letras/números.
+        //
+        // "Senhor [invisível] ia"
+        //             ↓
+        // "Senhoria"
+        //
+        // "Trib [invisível] unal"
+        //             ↓
+        // "Tribunal"
+        //
+        // "1 [invisível] 4ª"
+        //             ↓
+        // "14ª"
+        // ------------------------------------------------------
+
+        .replace(/([\p{L}\p{N}])[ \t]*\p{Cf}+[ \t]*(?=[\p{L}\p{N}])/gu, '$1')
+
+        // ------------------------------------------------------
+        // Remove os demais caracteres Unicode de formatação.
+        // ------------------------------------------------------
+
+        .replace(/\p{Cf}/gu, '')
+
+        // ------------------------------------------------------
+        // Espaços Unicode especiais -> espaço normal.
+        // ------------------------------------------------------
+
+        .replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+
+        // ------------------------------------------------------
+        // Normaliza espaços horizontais.
+        //
+        // Não mexe em \r e \n.
+        // ------------------------------------------------------
+
+        .replace(/[^\S\r\n]+/gu, ' ')
+    );
+  }
+
+  // ==========================================================
+  // CONVERTE TEXTO PARA HTML
+  // ==========================================================
+
+  function buildGeneratedHtml(text: string): string {
+    const sanitizedText = sanitizeGeneratedText(text);
+
+    if (!sanitizedText) {
+      return '';
     }
 
-    // --------------------------------------------------------
-    // Converte o texto em HTML seguro.
-    // --------------------------------------------------------
-
-    let html = escapeHtml(text);
-
-    // --------------------------------------------------------
-    // Preserva quebras de linha.
-    // --------------------------------------------------------
+    let html = escapeHtml(sanitizedText);
 
     html = html
       .replace(/\r\n/g, '\n')
       .replace(/\r/g, '\n')
       .replace(/\n/g, '<br>');
 
-    // --------------------------------------------------------
-    // RESTAURA VALORES LOCALMENTE
-    //
-    // A LLM nunca recebe os valores reais.
-    // --------------------------------------------------------
-
     html = unmaskDocument(html, context);
 
-    // --------------------------------------------------------
-    // Insere no ponto atual.
-    // --------------------------------------------------------
+    return html;
+  }
 
-    editor.insertHtml(html);
+  // ==========================================================
+  // CRIA O ELEMENTO NO PRIMEIRO CHUNK
+  // ==========================================================
 
-    // --------------------------------------------------------
-    // Mantém o cursor no final do chunk.
-    // --------------------------------------------------------
-
+  function createGeneratedElement(html: string): HTMLSpanElement {
     const selection = editor.getSelection();
 
-    if (selection) {
-      const ranges = selection.getRanges();
-
-      if (ranges.length > 0) {
-        const range = ranges[0].clone();
-
-        range.collapse(true);
-
-        selection.selectRanges([range]);
-      }
+    if (!selection) {
+      throw new Error('Seleção do CKEditor não encontrada.');
     }
+
+    const nativeSelection = selection.getNative();
+
+    if (!nativeSelection || nativeSelection.rangeCount === 0) {
+      throw new Error('Seleção nativa do editor não encontrada.');
+    }
+
+    // --------------------------------------------------------
+    // Obtém o range REAL do navegador.
+    // --------------------------------------------------------
+
+    const nativeRange = nativeSelection.getRangeAt(0).cloneRange();
+
+    // --------------------------------------------------------
+    // Cria o span diretamente no documento do iframe.
+    // --------------------------------------------------------
+
+    const nativeDocument = editor.document.$;
+
+    const span = nativeDocument.createElement('span') as HTMLSpanElement;
+
+    span.style.fontFamily = 'Arial, sans-serif';
+
+    span.style.fontSize = '16px';
+
+    span.innerHTML = html;
+
+    // --------------------------------------------------------
+    // Insere exatamente no ponto selecionado.
+    //
+    // Aqui NÃO existe chamada ao insertBefore do CKEditor.
+    // É o DOM nativo que faz a inserção.
+    // --------------------------------------------------------
+
+    nativeRange.insertNode(span);
+
+    // --------------------------------------------------------
+    // Coloca a seleção depois do elemento.
+    //
+    // Não precisamos mantê-la dentro do conteúdo porque
+    // a atualização do texto será feita diretamente via DOM.
+    // --------------------------------------------------------
+
+    nativeRange.setStartAfter(span);
+
+    nativeRange.collapse(true);
+
+    nativeSelection.removeAllRanges();
+
+    nativeSelection.addRange(nativeRange);
+
+    return span;
+  }
+
+  // ==========================================================
+  // RENDERIZAÇÃO INCREMENTAL
+  // ==========================================================
+  //
+  // A cada chunk:
+  //
+  // 1. receivedText recebe o novo trecho;
+  // 2. todo o conteúdo é sanitizado novamente;
+  // 3. o HTML é reconstruído;
+  // 4. o mesmo span é atualizado.
+  //
+  // Isso mantém o texto visível em tempo real e, ao mesmo
+  // tempo, permite corrigir caracteres invisíveis que tenham
+  // atravessado a fronteira entre dois chunks.
+  // ==========================================================
+
+  const renderGeneratedText = () => {
+    const html = buildGeneratedHtml(receivedText);
+
+    if (!html) {
+      return;
+    }
+
+    // ------------------------------------------------------
+    // PRIMEIRO CHUNK
+    // ------------------------------------------------------
+
+    if (!generatedElement) {
+      generatedElement = createGeneratedElement(html);
+
+      return;
+    }
+
+    // ------------------------------------------------------
+    // CHUNKS SEGUINTES
+    //
+    // Atualização direta do DOM nativo.
+    // ------------------------------------------------------
+
+    generatedElement.innerHTML = html;
   };
 
   // ==========================================================
@@ -481,9 +682,21 @@ export async function generateAssistant(state: AssistantState) {
       // ======================================================
 
       onText(text) {
+        if (!text) {
+          return;
+        }
+
+        // ----------------------------------------------------
+        // Guarda a resposta COMPLETA.
+        // ----------------------------------------------------
+
         receivedText += text;
 
-        insertChunk(text);
+        // ----------------------------------------------------
+        // Atualiza o editor imediatamente.
+        // ----------------------------------------------------
+
+        renderGeneratedText();
 
         setAssistantStatus(
           state,
@@ -512,18 +725,26 @@ export async function generateAssistant(state: AssistantState) {
     }
 
     // ========================================================
-    // FINAL
+    // RENDERIZAÇÃO FINAL
     // ========================================================
     //
-    // COM {{ }}:
+    // Garante que o DOM reflita exatamente a resposta completa.
+    // ========================================================
+
+    renderGeneratedText();
+
+    // ========================================================
+    // ATUALIZA O ELEMENTO EXTERNO
+    // ========================================================
     //
-    // NÃO usamos collapseEditorToEnd().
-    //
-    // Os delimitadores continuam no lugar.
-    //
-    // SEM {{ }}:
-    //
-    // Podemos posicionar no final.
+    // Isso ajuda o CKEditor a manter seu elemento <textarea>
+    // sincronizado com o conteúdo atual.
+    // ========================================================
+
+    editor.updateElement();
+
+    // ========================================================
+    // POSICIONA NO FINAL
     // ========================================================
 
     if (!isDelimited) {
@@ -541,6 +762,12 @@ export async function generateAssistant(state: AssistantState) {
     // ========================================================
 
     if (error instanceof DOMException && error.name === 'AbortError') {
+      // ------------------------------------------------------
+      // Mesmo cancelada, preservamos tudo o que já foi gerado.
+      // ------------------------------------------------------
+
+      editor.updateElement();
+
       setAssistantStatus(state, 'Geração interrompida.');
     } else {
       console.error('[TRT14 Assistente]', error);
@@ -886,14 +1113,6 @@ export function createSidebar(contents: HTMLElement): HTMLElement | null {
   // ==========================================================
   // CARREGA CONTEXTO DO INDEXEDDB
   // ==========================================================
-  //
-  // createSidebar() precisa continuar síncrona porque os
-  // consumidores atuais esperam o HTMLElement imediatamente.
-  //
-  // A leitura do IndexedDB acontece em seguida.
-  //
-  // Quando terminar, loadContext() atualiza a interface.
-  // ==========================================================
 
   void restoreAssistantContext(state);
 
@@ -1133,6 +1352,7 @@ export function createAssistantToolbar(editorContainer: HTMLElement) {
 
   button.addEventListener('click', (event) => {
     event.preventDefault();
+
     event.stopPropagation();
 
     toggleSidebar(button);

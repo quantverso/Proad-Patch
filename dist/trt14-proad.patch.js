@@ -14,8 +14,8 @@
 (function() {
 	//#region src/config.ts
 	var EDITOR_IDS = ["formCriarMinutaDocumento:editor:editor", "formCriarAutoTexto:editor:editor"];
-	var GEMINI_API_KEY = "";
-	var GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse";
+	var GEMINI_API_KEY = "AQ.Ab8RN6IvUECLUkL4ZfCIlp8DENoCaLxONPKPh61MsYCq_n1Vtw";
+	var GEMINI_ENDPOINT = "";
 	var MODEL_CONFIG = {
 		"gemini-3.5-flash-lite": {
 			label: "Gemini 3.5 Flash-Lite",
@@ -1090,21 +1090,43 @@ ${state.prompt.value.trim()}
 			const selection = editor.getSelection();
 			if (selection) selection.selectRanges([range]);
 		}
-		const insertChunk = (text) => {
-			if (!text) return;
-			let html = escapeHtml$1(text);
+		let generatedElement = null;
+		function sanitizeGeneratedText(text) {
+			return text.normalize("NFC").replace(/([\p{L}\p{N}])[ \t]*\p{Cf}+[ \t]*(?=[\p{L}\p{N}])/gu, "$1").replace(/\p{Cf}/gu, "").replace(/[\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000]/g, " ").replace(/[^\S\r\n]+/gu, " ");
+		}
+		function buildGeneratedHtml(text) {
+			const sanitizedText = sanitizeGeneratedText(text);
+			if (!sanitizedText) return "";
+			let html = escapeHtml$1(sanitizedText);
 			html = html.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\n/g, "<br>");
 			html = unmaskDocument(html, context);
-			editor.insertHtml(html);
+			return html;
+		}
+		function createGeneratedElement(html) {
 			const selection = editor.getSelection();
-			if (selection) {
-				const ranges = selection.getRanges();
-				if (ranges.length > 0) {
-					const range = ranges[0].clone();
-					range.collapse(true);
-					selection.selectRanges([range]);
-				}
+			if (!selection) throw new Error("Seleção do CKEditor não encontrada.");
+			const nativeSelection = selection.getNative();
+			if (!nativeSelection || nativeSelection.rangeCount === 0) throw new Error("Seleção nativa do editor não encontrada.");
+			const nativeRange = nativeSelection.getRangeAt(0).cloneRange();
+			const span = editor.document.$.createElement("span");
+			span.style.fontFamily = "Arial, sans-serif";
+			span.style.fontSize = "16px";
+			span.innerHTML = html;
+			nativeRange.insertNode(span);
+			nativeRange.setStartAfter(span);
+			nativeRange.collapse(true);
+			nativeSelection.removeAllRanges();
+			nativeSelection.addRange(nativeRange);
+			return span;
+		}
+		const renderGeneratedText = () => {
+			const html = buildGeneratedHtml(receivedText);
+			if (!html) return;
+			if (!generatedElement) {
+				generatedElement = createGeneratedElement(html);
+				return;
 			}
+			generatedElement.innerHTML = html;
 		};
 		setAssistantStatus(state, "Gerando documento...", true);
 		try {
@@ -1114,8 +1136,9 @@ ${state.prompt.value.trim()}
 				thinking: state.thinkingSelect.value,
 				signal: controller.signal,
 				onText(text) {
+					if (!text) return;
 					receivedText += text;
-					insertChunk(text);
+					renderGeneratedText();
 					setAssistantStatus(state, `Gerando... ${receivedText.length} caracteres`, true);
 				},
 				onComplete() {
@@ -1126,11 +1149,15 @@ ${state.prompt.value.trim()}
 				setAssistantStatus(state, "Nenhum texto foi recebido.");
 				return;
 			}
+			renderGeneratedText();
+			editor.updateElement();
 			if (!isDelimited) collapseEditorToEnd(editor);
 			setAssistantStatus(state, completed ? "Concluído." : "Geração finalizada.");
 		} catch (error) {
-			if (error instanceof DOMException && error.name === "AbortError") setAssistantStatus(state, "Geração interrompida.");
-			else {
+			if (error instanceof DOMException && error.name === "AbortError") {
+				editor.updateElement();
+				setAssistantStatus(state, "Geração interrompida.");
+			} else {
 				console.error("[TRT14 Assistente]", error);
 				setAssistantStatus(state, `Erro: ${error instanceof Error ? error.message : String(error)}`);
 			}
