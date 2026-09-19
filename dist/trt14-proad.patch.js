@@ -14,7 +14,7 @@
 (function() {
 	//#region src/config.ts
 	var EDITOR_IDS = ["formCriarMinutaDocumento:editor:editor", "formCriarAutoTexto:editor:editor"];
-	var GEMINI_API_KEY = "AQ.Ab8RN6IvUECLUkL4ZfCIlp8DENoCaLxONPKPh61MsYCq_n1Vtw";
+	var GEMINI_API_KEY = "";
 	var GEMINI_ENDPOINT = "";
 	var MODEL_CONFIG = {
 		"gemini-3.5-flash-lite": {
